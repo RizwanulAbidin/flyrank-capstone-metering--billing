@@ -1,0 +1,19 @@
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: metering
+    ports: ["5432:5432"]
+    # Postgres 18 stores data in a version-specific subdirectory and expects the
+    # mount one level above it. The older /var/lib/postgresql/data path makes the
+    # container refuse to start.
+    volumes: [meteringdata:/var/lib/postgresql]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d metering"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  meteringdata:

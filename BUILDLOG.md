@@ -112,3 +112,74 @@ numbers; if they turn out to make a poor demo they get changed in Phase 5 and no
 
 Design doc written. Data model, metering path, policies, status codes and non-goals all settled
 before any service code exists.
+
+---
+
+## Phase 2 — core billing logic (2026-08-20)
+
+Migrations, tenant auth, the idempotency layer, reserve → commit, quota enforcement, and
+`POST /generate` + `GET /usage`. 86 tests, all passing.
+
+### Two real bugs the tests found
+
+**1. The test suite was deleting its own data.** Every integration test started with a `TRUNCATE`.
+Alone, each file passed. Together, 15 of 86 failed — a request would suddenly return `401`
+mid-test because a *different* test file, running in a parallel process, had just truncated the
+tenants table.
+
+The lazy fix is `--test-concurrency=1`. I did not do that, because it hides the problem rather than
+solving it and makes the suite slower forever. Instead every test now creates its own tenant with a
+random API key and asserts only on that tenant's rows. Since every table is tenant-scoped, the tests
+isolate exactly the way real customers do. No reset needed, and they stay parallel.
+
+**2. Money was arriving from the database as a string.** A test asserting the spend cap failed with
+`'2600' !== 2600`. node-postgres returns `bigint` columns as strings rather than risk losing
+precision above 2^53 — and every money column here is `bigint`.
+
+What makes this worth writing down is that it *almost worked*. `4000 > '2600'` coerces the string
+and gives the right answer, so every quota comparison behaved correctly. The bug was invisible until
+a value was compared with `===`, or added to something, or serialised into a response as `"2600"`.
+
+Fixed by converting once at the repository boundary in `mapTenant`, since that is the only layer
+that knows the value came out of Postgres. The regression test now asserts `typeof === 'number'`,
+not just the value.
+
+I would not have caught either of these by reading the code.
+
+### Decisions worth defending
+
+- **Reservations are serialised with a row lock on the tenant** (`SELECT ... FOR UPDATE OF t`), not
+  with `SERIALIZABLE` isolation. Two requests from the same tenant queue; different tenants are
+  unaffected. It is one line, it is easy to explain, and the twenty-concurrent-request test proves
+  it works.
+- **The idempotency claim commits immediately, in its own short transaction**, before the slow work
+  starts. Holding it open would make a duplicate block on the row lock for the whole request instead
+  of being told the truth straight away.
+- **The work happens outside any transaction.** It is the slow part; holding a database lock across
+  it would serialise the entire tenant for the duration.
+- **One reservation row per request** carrying all three estimates, rather than one row per usage
+  type. This refines the Phase 1 design — the release path is a single state transition instead of
+  two rows to keep in sync.
+- **The concurrency test does not assert "1 success and 19 conflicts".** That split depends on
+  timing: a duplicate arriving mid-flight gets `409`, one arriving after completion gets a replayed
+  `200`, and both are correct. Pinning the ratio would make the suite flaky under load — the worst
+  possible property for the test guarding against double-charging. It asserts the invariant instead:
+  every response is `200` or `409`, all successes are identical, and exactly one usage event exists.
+
+### Where AI helped
+
+Wrote the repositories, services, HTTP layer and tests. It also diagnosed both bugs above from the
+failure output rather than me having to bisect them.
+
+### Where I need to be able to explain myself
+
+- Why the `UNIQUE (tenant_id, endpoint, key)` constraint is the duplicate prevention, and a
+  read-then-insert is not.
+- Why a held reservation has to be a row rather than a number held in memory.
+- Why `409` and not `429` when a duplicate arrives mid-flight.
+
+### Gate
+
+`npm test` — 86 passing, 0 failing, stable across three consecutive runs. The double-count test
+passes under twenty simultaneous requests, and the boundary returns `429`/`402` per the documented
+precedence.
