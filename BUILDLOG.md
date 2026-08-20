@@ -368,3 +368,47 @@ also spotted the seed-clobbering bug from one line of boot output that I would h
 
 `npm test` - 108 passing. `/usage` matches the pinned pricing tests. The background job runs, is
 idempotent, and has been verified against live Stripe.
+
+---
+
+## Phase 5 - demo preparation (2026-08-21)
+
+Wrote `src/db/seedDemo.js` and `DEMO.md`, and rehearsed the whole thing twice.
+
+### The rehearsal caught a broken demo
+
+First run through, the very first request returned `429` instead of `200`. The demo tenant was
+seeded with 80,000... no, 88,000 tokens used, and a typical request reserves 13,200. 88,000 +
+13,200 = 101,200, over the 100,000 limit. The boundary I wanted to demonstrate was already behind
+me before I started.
+
+It broke a second beat too, and that one is more interesting: because request 1 was refused, its
+idempotency key was deleted - the deliberate behaviour from Phase 1 so that a tenant who upgrades
+and retries is not served a stale rejection. So the follow-up "same key, different body" call was
+treated as a brand new request and returned `200` where the script promised `422`. Correct system,
+wrong script.
+
+Reseeded at 80,000, which leaves room for exactly one request and refuses the second. The arithmetic
+is now written into the seed file as a comment so nobody re-tunes it by guesswork.
+
+Rehearsing is not optional for this. Both failures were in my staging, not my code, and I would
+have found them live.
+
+### Deliberate choices in the demo
+
+- **Three of the five beats are refusals.** The brief says one failure handled gracefully beats ten
+  happy paths, and the interesting behaviour in a billing system is what it refuses.
+- **Two demo tenants, not one.** `Nearly Full Ltd` runs out of allowance (429) and
+  `Nearly Broke Ltd` runs out of money (402), so the difference between the two status codes is
+  shown rather than explained.
+- **`npm run seed:demo` resets both to their starting line**, so the demo is repeatable. It is
+  separate from the ordinary seed because it manufactures a specific situation rather than setting
+  up a clean system.
+- **The lost webhook is in the script as a fallback**, not hidden. If Stripe or the CLI misbehaves
+  live, the answer is to run the reconciliation job and tell the story - which is a better story
+  than the happy path was.
+
+### Gate
+
+Demo rehearsed twice end to end, all beats produce the output written in `DEMO.md`, and the whole
+suite is green at 108.

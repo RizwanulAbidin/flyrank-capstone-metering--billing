@@ -267,6 +267,7 @@ _Runtime limitations discovered during the build get added here in Phase 4._
 | File | What it is |
 |---|---|
 | `DESIGN.md` | The design contract: data model, metering path, policies, non-goals |
+| `DEMO.md` | The rehearsed six-minute demo script, with real captured output |
 | `capstone.yaml` | Manifest the evaluator reads: run, seed, test, base URL, endpoints |
 | `EVIDENCE.md` | One pasted proof per Definition-of-Done checkbox |
 | `BUILDLOG.md` | Honest log of where AI helped and where it was wrong |
