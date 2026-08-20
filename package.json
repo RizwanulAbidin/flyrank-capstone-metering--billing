@@ -7,7 +7,8 @@
     "test": "node --env-file=.env --test \"test/*.test.js\"",
     "migrate": "node --env-file=.env src/db/migrate.js",
     "seed": "node --env-file=.env src/db/seed.js",
-    "start": "node --env-file=.env src/index.js"
+    "start": "node --env-file=.env src/index.js",
+    "reconcile": "node --env-file=.env src/jobs/reconcile.js"
   },
   "keywords": [],
   "author": "Rizwanul Abidin Asim",

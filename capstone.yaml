@@ -1,5 +1,5 @@
-# Manifest the evaluator reads. Keep every command here runnable on a clean machine.
-# Phase 0: only `test` is real. `run`, `seed` and the endpoints land in Phase 2.
+# Manifest the evaluator reads. Every command here works on a clean machine with
+# Docker installed and a .env copied from .env.example.
 
 name: flyrank-capstone-metering-billing
 description: >-
@@ -10,15 +10,67 @@ description: >-
 language: javascript
 runtime: node >=20
 
-# TODO Phase 2: becomes `docker compose up --build`
-run: null
+# Builds the image, waits for Postgres to report healthy, applies migrations,
+# seeds the demo tenants, then serves. Safe to re-run.
+run: docker compose up --build
 
-# TODO Phase 2: seeds two plans and a tenant sitting just under its quota
-seed: null
+# Included in `run`. Listed separately so it can be re-applied on its own.
+seed: docker compose exec api node src/db/seed.js
 
+# Needs the database up: `docker compose up -d db` first.
 test: npm test
+
+# The reconciliation background job. Releases expired reservations and corrects
+# any tenant whose plan disagrees with Stripe.
+job: npm run reconcile
 
 base_url: http://localhost:3000
 
-# TODO Phase 2-4: fill in as each endpoint lands.
-endpoints: []
+# Both demo tenants start on the Free plan. Only the SHA-256 of these keys is
+# stored; they are worthless outside a local database.
+demo_credentials:
+  - tenant: Acme Ltd
+    api_key: sk_demo_acme_0000000000000000
+  - tenant: Globex Inc
+    api_key: sk_demo_globex_000000000000000
+
+endpoints:
+  - method: GET
+    path: /health
+    auth: none
+    expect: 200
+
+  - method: GET
+    path: /usage
+    auth: bearer api key
+    expect: 200
+    note: Rollup for the current month - used, limits, held reservations, remaining.
+
+  - method: POST
+    path: /generate
+    auth: bearer api key + Idempotency-Key header
+    body: '{"input_tokens":1200,"cached_input_tokens":8000,"max_output_tokens":2000}'
+    expect: 200
+    errors:
+      400: Idempotency-Key missing, or body failed validation
+      401: unknown or missing API key
+      402: subscription inactive, or the monthly spend cap would be exceeded
+      409: a request with this idempotency key is still in flight
+      422: this idempotency key was already used with a different body
+      429: the monthly API call or token quota would be exceeded
+
+  - method: POST
+    path: /billing/checkout
+    auth: bearer api key
+    expect: 200
+    note: Returns a Stripe test-mode Checkout URL. Requires STRIPE_SECRET_KEY.
+
+  - method: POST
+    path: /webhooks/stripe
+    auth: Stripe-Signature header
+    expect: 200
+    errors:
+      400: signature verification failed
+    note: >-
+      Raw body, verified before anything is read. Replays are recognised by the
+      stripe_event_id primary key and answered with duplicate=true.

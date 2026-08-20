@@ -1,4 +1,22 @@
 services:
+  api:
+    build: .
+    ports: ["3000:3000"]
+    environment:
+      # Inside the compose network the database host is `db`, not localhost.
+      DATABASE_URL: postgres://postgres:dev@db:5432/metering
+      PORT: 3000
+      # Read from your .env; placeholders keep the stack bootable without Stripe.
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-sk_test_placeholder}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-whsec_placeholder}
+      STRIPE_PRICE_ID_PRO: ${STRIPE_PRICE_ID_PRO:-}
+    depends_on:
+      db:
+        condition: service_healthy
+    # Migrate, seed, then serve. Migrations are idempotent and the seed upserts,
+    # so restarting the stack is safe and repeatable.
+    command: sh -c "node src/db/migrate.js && node src/db/seed.js && node src/index.js"
+
   db:
     image: postgres:18
     environment:

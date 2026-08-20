@@ -299,3 +299,72 @@ Server response: `{"received":true,"duplicate":false,"applied":"upgraded to pro"
 Local webhook delivery is best-effort. In production the endpoint would be a real registered
 webhook with Stripe's own retry schedule behind it; the CLI listener has neither. The reconciliation
 job is what closes that gap in both cases.
+
+---
+
+## Phase 4 - cost rollups, the background job, and finalisation (2026-08-20)
+
+The reconciliation job, month-rollover tests, a one-command Docker boot, and the submission pack
+finished. 108 tests passing.
+
+### Two bugs, and both were mine rather than the framework's
+
+**1. Seeding silently undid a real payment.** `docker compose up` runs the seed on every start, and
+the seed used `ON CONFLICT (api_key_hash) DO UPDATE SET plan_code = EXCLUDED.plan_code`. So
+restarting the stack downgraded the tenant who had just paid, straight back to Free. I caught it
+because the boot log printed `Acme Ltd [free]` seconds after I had watched Stripe upgrade it to Pro.
+
+Changed to `DO NOTHING`. The principle: **seed data creates rows, it does not own their state
+afterwards.** An upsert that rewrites live business state is not a seed, it is a reset.
+
+**2. A global background job broke test isolation.** The reconciliation job walks *every* tenant
+with a Stripe customer id. My tests called it with an empty fake Stripe, so it dutifully concluded
+that every tenant in the database - including the real demo tenant, and every tenant belonging to
+other test files - had no subscription, and cancelled them all.
+
+The Phase 2 fix for test isolation was "scope each test to its own tenant", and that works when the
+code under test is per-request. It does not work for a job whose whole purpose is to be global.
+
+Fixed by giving `reconcile()` an optional `tenantIds` filter. That is not test-only scaffolding:
+re-checking one customer after an incident is a real operational need, and it happens to make the
+tests honest.
+
+### The job proved itself on the way in
+
+The lost webhook from Phase 3, plus bug 2 above, left the demo tenant reading `free / canceled`
+while Stripe still had an active subscription. Running the job against live Stripe corrected it to
+`pro / active` in one pass, and a second run corrected nothing - idempotent.
+
+The same run threw 36 errors, all leftover test tenants with invented customer ids. That is the
+resilience requirement demonstrated for real rather than in a fixture: 36 tenants failed, the run
+finished, and the one tenant that needed fixing was fixed.
+
+I did not plan to demonstrate the job this way. It happened because the thing it exists to catch
+actually happened.
+
+### Decisions worth defending
+
+- **The month rollover is tested at one-second resolution.** A tenant filled to exactly its August
+  limit is refused at 23:59:59 on 31 August and allowed at 00:00:00 on 1 September. Nothing changes
+  but the clock. That test is only possible because `now()` is injectable.
+- **`billing_period` is asserted at the row level**, not just through the API: two requests either
+  side of midnight produce two rows filed under two different months. An event keeps the period it
+  happened in, not the period you happen to ask in.
+- **`docker compose up --build` is the entire run command.** It builds, waits for Postgres to be
+  healthy, migrates, seeds, and serves. Migrations are recorded and skipped on re-run and the seed
+  no longer clobbers anything, so restarting is genuinely safe.
+- **`.dockerignore` excludes `.env`.** The image is built from a `COPY src ./src`, so secrets could
+  not get baked in even by accident.
+- **The reconciliation job returns a report rather than logging prose** - counts, drift entries,
+  and errors. Same instinct as the run report in A9: a job that reports nothing can fail silently
+  for weeks.
+
+### Where AI helped
+
+Wrote the job, the rollover and reconcile tests, the Docker setup, and the README run section. It
+also spotted the seed-clobbering bug from one line of boot output that I would have scrolled past.
+
+### Gate
+
+`npm test` - 108 passing. `/usage` matches the pinned pricing tests. The background job runs, is
+idempotent, and has been verified against live Stripe.

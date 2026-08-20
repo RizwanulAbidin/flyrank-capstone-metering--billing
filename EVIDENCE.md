@@ -98,18 +98,39 @@ quota still has 999,800 tokens free - money ran out, not allowance. Beyond the b
 
 ## Cost calculation
 
-### ☐ Monthly usage rolls up into a cost figure per tenant
+### ☑ Monthly usage rolls up into a cost figure per tenant
 
-_Phase 4._
+```
+$ curl localhost:3000/usage -H 'Authorization: Bearer sk_demo_acme_0000000000000000'
+{
+  "plan": "pro",
+  "billing_period": "2026-08-01",
+  "limits":    {"api_calls":50000,"tokens":5000000,"spend_cap_micros":100000000},
+  "used":      {"calls":1,"tokens":10471,"cost_micros":26065},
+  "held":      {"calls":0,"tokens":0,"cost_micros":0},
+  "remaining": {"calls":49999,"tokens":4989529,"spend_micros":99973935}
+}
+```
 
-### ☐ AI token pricing handles cached input, reasoning tokens, and output correctly
+Held reservations are reported separately from committed usage, so an in-flight request is
+visible rather than hidden.
 
-_Phase 4._
+### ☑ AI token pricing handles cached input, reasoning tokens, and output correctly
 
-### ◐ Pricing constants are pinned and covered by tests
+```
+ok - cached input costs a tenth of fresh input for the same token count
+ok - reasoning tokens are billed at exactly the output rate
+ok - categories cannot be added together and multiplied by one rate
+```
 
-The money primitive every price calculation is built on is in place and pinned. The pricing
-*config* itself lands in Phase 4; this is the arithmetic underneath it.
+That third test computes the correct total (33,300 micros) and the naive
+"sum the tokens, multiply by one rate" total (12,000 micros) and asserts they differ - it
+documents the trap rather than merely avoiding it.
+
+### ☑ Pricing constants are pinned and covered by tests
+
+Constants live in `src/config/pricing.js`, quoted as micros per 1,000,000 units. Every rate is
+covered by table-driven tests asserting exact integers - no tolerances.
 
 ```
 $ npm test
@@ -210,9 +231,18 @@ migrations: applied 001_init.sql
 
 Seven tables. Every customer-owned row carries `tenant_id`.
 
-### ☐ Tests cover duplicate usage, quota boundaries, cost calculations, invalid and duplicate webhooks
+### ☑ Tests cover duplicate usage, quota boundaries, cost calculations, invalid and duplicate webhooks
 
-_Phases 2–4._
+```
+$ npm test
+# tests 108
+# pass 108
+# fail 0
+```
+
+Eight files: money, pricing, clock, quota (pure), metering, boundary, isolation, webhooks,
+rollover, reconcile. The integration tests run against a real Postgres because the guarantees
+being proved live in database constraints, not in application code.
 
 ### ☑ A tenant cannot read another tenant's data
 
@@ -227,21 +257,69 @@ The tests attempt the crossings rather than assuming they are impossible. The se
 interesting one: two tenants sending the *same* idempotency key each get their own event, because a
 shared key namespace would be a cross-tenant data leak disguised as a cache hit.
 
-### ☐ Month rollover is correct
+### ☑ Month rollover is correct
 
-_Phase 4. Beyond the brief — uses an injectable clock so the date can be pinned._
+```
+ok - usage recorded in one month does not count against the next
+ok - the boundary is one second wide, not one day
+ok - events are filed under the period they happened in, not the period we ask in
+ok - a held reservation only counts against its own month
+```
 
-### ☐ Background job: reconciliation against Stripe
+A tenant filled to exactly its August limit is refused at 23:59:59 on 31 August and allowed at
+00:00:00 on 1 September - one second apart, nothing else changed. Beyond the brief; possible
+because `now()` comes from an injectable clock.
 
-_Phase 4. Satisfies shared requirement #3, which the core checklist does not mention._
+### ☑ Background job: reconciliation against Stripe
 
-### ◐ README + architecture diagram + setup instructions; submission-pack files present
+Satisfies shared requirement #3, which the core Definition of Done never mentions.
 
-All five required files exist as of Phase 0: `README.md`, `capstone.yaml`, `EVIDENCE.md`,
-`BUILDLOG.md`, `.env.example`.
+```
+ok - a tenant Stripe says is paying, but we have as free, is corrected to pro
+ok - a tenant whose subscription Stripe has cancelled is downgraded to free
+ok - a tenant already in agreement with Stripe is left alone
+ok - past_due at Stripe is mirrored, and then blocks billable requests
+ok - one tenant failing does not abandon the rest of the run
+ok - a reservation left held past its expiry is released
+ok - a reservation still inside its window is left alone
+ok - the report is honest about what it did
+```
 
-The ASCII architecture diagram is in the README as of Phase 1, alongside the plan table, the API
-surface, the policies and the limitations. The full design contract is in `DESIGN.md`.
+**And it was proved for real, not only in tests.** After the lost webhook (see `BUILDLOG.md`),
+the demo tenant was left disagreeing with Stripe. Running the job against live Stripe:
 
-Still outstanding: setup and run instructions, which cannot be written honestly until there is
-something to run (Phase 2).
+```
+$ npm run reconcile
+
+Acme Ltd before : free / canceled
+Acme Ltd after  : pro / active    (stripe_customer_id cus_V6pJReBK40tFZR)
+
+second run      : drift_corrected 0     - idempotent, nothing left to fix
+                  tenants_checked 37
+                  errors 36             - leftover test tenants with fake customer ids
+```
+
+Those 36 failures are the resilience rule demonstrated live: 36 tenants errored, the run
+completed anyway, and the one tenant that needed fixing was fixed.
+
+### ☑ README + architecture diagram + setup instructions; submission-pack files present
+
+All five required files present: `README.md`, `capstone.yaml`, `EVIDENCE.md`, `BUILDLOG.md`,
+`.env.example` - plus `DESIGN.md` and an MIT `LICENSE`.
+
+The README carries the ASCII architecture diagram, the plan table, the API surface, the written
+policies, the limitations, and the run instructions. `capstone.yaml` lists every endpoint with its
+expected status codes.
+
+One documented command boots the whole system from nothing:
+
+```
+$ docker compose up --build
+
+api-1  | migrations: applied 001_init.sql
+api-1  | seed: 2 plans
+api-1  | seed: tenant Acme Ltd [free/active] d0a77176-5bcb-4b04-80d6-45d8c4635c57
+api-1  |         api key: sk_demo_acme_0000000000000000
+api-1  | seed: tenant Globex Inc [free/active] 1d5cba41-d60c-4055-8075-bff319e984d5
+api-1  | metering-billing listening on port 3000
+```

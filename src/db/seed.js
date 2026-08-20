@@ -48,17 +48,24 @@ async function seedPlans() {
 
 async function seedTenants() {
   for (const tenant of DEMO_TENANTS) {
-    const { rows } = await pool.query(
+    // DO NOTHING, not DO UPDATE. Seeding runs on every stack start, and an
+    // upsert that rewrote plan_code would silently downgrade a tenant who had
+    // just paid - the seed would quietly undo a real Stripe upgrade on restart.
+    // Seed data creates tenants; it does not own their state afterwards.
+    await pool.query(
       `INSERT INTO tenants (name, plan_code, api_key_hash)
        VALUES ($1, $2, $3)
-       ON CONFLICT (api_key_hash) DO UPDATE SET
-         name = EXCLUDED.name,
-         plan_code = EXCLUDED.plan_code
-       RETURNING id`,
+       ON CONFLICT (api_key_hash) DO NOTHING`,
       [tenant.name, tenant.plan, hashApiKey(tenant.apiKey)]
     );
 
-    console.log(`seed: tenant ${tenant.name} [${tenant.plan}] ${rows[0].id}`);
+    const { rows } = await pool.query(
+      'SELECT id, plan_code, subscription_status FROM tenants WHERE api_key_hash = $1',
+      [hashApiKey(tenant.apiKey)]
+    );
+
+    const row = rows[0];
+    console.log(`seed: tenant ${tenant.name} [${row.plan_code}/${row.subscription_status}] ${row.id}`);
     console.log(`        api key: ${tenant.apiKey}`);
   }
 }

@@ -77,7 +77,17 @@ async function setStripeCustomer(client, tenantId, stripeCustomerId) {
   ]);
 }
 
+// Every tenant the reconciliation job needs to check against Stripe.
+async function listWithStripeCustomer(executor) {
+  const { rows } = await executor.query(
+    `${TENANT_WITH_PLAN} WHERE t.stripe_customer_id IS NOT NULL ORDER BY t.created_at`
+  );
+
+  return rows.map(mapTenant);
+}
+
 module.exports = {
+  listWithStripeCustomer,
   findByApiKeyHash,
   findById,
   findByStripeCustomerId,

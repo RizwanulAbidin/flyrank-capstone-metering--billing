@@ -1,8 +1,8 @@
 # Usage Metering & Billing Engine
 
-> **Status: Phase 1 of 5 — designed, not yet built.** The full design is in
-> [`DESIGN.md`](DESIGN.md). This README grows one section per phase; sections marked _pending_ are
-> not yet true.
+> **Status: Phase 4 of 5 — built, tested, and verified against live Stripe test mode.**
+> 108 tests passing. The design contract is in [`DESIGN.md`](DESIGN.md); the proof for each
+> Definition-of-Done box is in [`EVIDENCE.md`](EVIDENCE.md).
 
 The backend service that answers the three questions every SaaS product has to answer about a
 customer: **how much have they used, what does it cost, and are they allowed to do this next
@@ -113,7 +113,7 @@ the reasoning are in [`DESIGN.md` §4](DESIGN.md).
 
 ## API
 
-Designed; implementation lands in Phases 2–3.
+All five endpoints are built and covered by tests.
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
@@ -125,11 +125,82 @@ Designed; implementation lands in Phases 2–3.
 
 ## Running it
 
-_Pending — Phase 2._ For now:
+You need Docker. Nothing else - no local Node, no local Postgres.
 
 ```
+cp .env.example .env      # copy .env.example .env  on Windows
+docker compose up --build
+```
+
+That one command builds the image, waits for Postgres to report healthy, applies migrations, seeds
+two demo tenants, and serves on http://localhost:3000. It is safe to re-run: migrations are
+recorded and skipped, and the seed only inserts tenants that do not already exist.
+
+Check it is alive:
+
+```
+curl http://localhost:3000/health
+```
+
+### Demo credentials
+
+Both tenants start on Free. Only the SHA-256 of each key is stored, and they are worthless outside
+a local database.
+
+| Tenant | API key |
+|---|---|
+| Acme Ltd | `sk_demo_acme_0000000000000000` |
+| Globex Inc | `sk_demo_globex_000000000000000` |
+
+### A billable request
+
+```
+curl -X POST http://localhost:3000/generate \
+  -H "Authorization: Bearer sk_demo_acme_0000000000000000" \
+  -H "Idempotency-Key: demo-001" \
+  -H "Content-Type: application/json" \
+  -d '{"input_tokens":1200,"cached_input_tokens":8000,"max_output_tokens":2000}'
+```
+
+On Windows PowerShell use `curl.exe --%` and escape the inner quotes, as in the A3 and A5
+READMEs.
+
+Send it twice with the same key and the second response is byte-identical, with one usage event
+recorded. Send it again with a different body and the same key and you get `422`.
+
+### The tests
+
+The suite needs a database but not the API container:
+
+```
+docker compose up -d db
+npm install
 npm test
 ```
+
+108 tests. The webhook tests generate their own Stripe signatures locally, so no Stripe account is
+needed to run them.
+
+### The background job
+
+```
+npm run reconcile
+```
+
+Releases expired reservations and corrects any tenant whose plan disagrees with Stripe. Prints an
+honest report.
+
+### Stripe (optional)
+
+Only needed to run a real Checkout. Put a test-mode secret key and a price id in `.env`, then:
+
+```
+stripe login
+stripe listen --forward-to localhost:3000/webhooks/stripe
+```
+
+Paste the printed `whsec_` into `.env` as `STRIPE_WEBHOOK_SECRET` and restart the stack. Pay with
+card `4242 4242 4242 4242`, any future expiry, any CVC.
 
 ## Policies
 
