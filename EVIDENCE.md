@@ -137,9 +137,42 @@ test('floats cannot represent money, integers can', () => {
 
 ## Stripe integration
 
-### ☐ Subscription checkout works end to end in test mode
+### ☑ Subscription checkout works end to end in test mode
 
-_Phase 3._
+A real Checkout in the browser, test card `4242 4242 4242 4242`, Stripe sandbox
+(`livemode: false`).
+
+```
+$ curl -X POST localhost:3000/billing/checkout -H 'Authorization: Bearer <acme key>'
+{"checkout_url":"https://checkout.stripe.com/c/pay/cs_test_a1OBiy...","session_id":"cs_test_a1OBiy..."}
+
+# after paying:
+session status         : complete
+payment_status         : paid
+customer               : cus_V6pJReBK40tFZR
+subscription           : sub_1U6beTIKVnVjolJIGcR6tsT7
+```
+
+The webhook then upgraded the tenant:
+
+```
+server responded: 200 {"received":true,"duplicate":false,"applied":"upgraded to pro"}
+
+   name   | plan_code | subscription_status |   stripe_customer_id
+ Acme Ltd | pro       | active              | cus_V6pJReBK40tFZR
+```
+
+`GET /usage` before: 1,000 calls / 100,000 tokens / $1.00 cap.
+`GET /usage` after:  50,000 calls / 5,000,000 tokens / $100.00 cap - with recorded usage
+(1 call, 10,471 tokens) unchanged. The plan moved; the ledger did not.
+
+Live replay and forgery checks against the running server:
+
+```
+same event again        -> 200 {"received":true,"duplicate":true,"applied":null}
+wrong signing secret    -> 400 {"error":"Webhook signature verification failed",
+                                "code":"invalid_signature"}
+```
 
 ### ☑ Webhooks verify signatures, ignore duplicate events, and update tenant plan/status
 

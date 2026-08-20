@@ -251,3 +251,51 @@ end-to-end path outside the test suite. Everything else is verified.
 
 `npm test` - 96 passing, 0 failing, stable across three consecutive runs. Forged signature returns
 400 and changes nothing; a replayed event is processed exactly once.
+
+---
+
+## Phase 3 (live run) - a webhook went missing, and that turned out to be the useful part
+
+Ran a real Checkout in the browser with the `4242` test card. Stripe recorded it correctly:
+`status: complete`, `payment_status: paid`, a customer and a subscription created at 19:29:26.
+
+**Our database never saw it.** The plan stayed `free`. The newest row in
+`processed_webhook_events` was from 19:12 - the synthetic `stripe trigger` from earlier.
+
+What made this confusing is that nothing was broken. `stripe listen` was still running, same PID as
+before. The server was up. Postgres was healthy. Firing a fresh `stripe trigger` landed in the
+database within seconds. The pipe worked before the payment and after it, but not during.
+
+The explanation: **`stripe listen` is a websocket, not a durable queue.** If the connection drops
+and reconnects, events emitted during the gap are simply gone. The CLI does not backfill them, and
+it does not warn you.
+
+This is the single best argument I have for the reconciliation job, and I did not have to invent
+the scenario - it happened by itself on the first real payment. A tenant paid, Stripe knew, and our
+database disagreed. Nothing in the metering path would ever have noticed. That is precisely what a
+nightly comparison against Stripe's view is for, and it is why the job is a requirement rather than
+a nice-to-have.
+
+### How it was recovered
+
+`stripe events resend` failed with `resource-missing`, because it re-delivers to a *configured*
+webhook endpoint and we only have a CLI listener. So the event was fetched from Stripe's API, signed
+with the real `whsec_`, and POSTed to the server - which is exactly what the CLI does. The event was
+genuine and the signature verification ran for real; only the transport was substituted.
+
+Server response: `{"received":true,"duplicate":false,"applied":"upgraded to pro"}`.
+
+### Verified live, not just in tests
+
+- Acme: `free` -> `pro`, `stripe_customer_id` set, subscription row `active`.
+- `GET /usage`: limits jumped from 1,000 / 100,000 / $1.00 to 50,000 / 5,000,000 / $100.00, while
+  the recorded usage (1 call, 10,471 tokens) stayed exactly where it was. The plan changed; the
+  ledger did not.
+- Same event delivered again: `{"duplicate":true,"applied":null}`.
+- Signature computed with the wrong secret: `400 invalid_signature`.
+
+### A limitation to write into the README
+
+Local webhook delivery is best-effort. In production the endpoint would be a real registered
+webhook with Stripe's own retry schedule behind it; the CLI listener has neither. The reconciliation
+job is what closes that gap in both cases.
