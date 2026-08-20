@@ -12,7 +12,7 @@
 //              database lock across it would serialise the whole tenant.
 //   4. COMMIT  the actual usage, release the surplus, store the response.
 
-const { withTransaction } = require('../db/pool');
+const { pool, withTransaction } = require('../db/pool');
 const { ApiError } = require('../errors');
 const { now, billingPeriod } = require('../clock');
 const tenantRepo = require('../repositories/tenantRepo');
@@ -190,10 +190,12 @@ async function replayOrRefuse({ tenant, key, requestFingerprint }) {
 
 async function usageFor(tenant, at = now()) {
   const period = billingPeriod(at);
-  const committed = await usageRepo.committedTotals(require('../db/pool').pool, tenant.id, period);
-  const held = await withTransaction((client) =>
-    reservationRepo.heldTotals(client, tenant.id, period)
-  );
+
+  // Two plain reads. Deliberately not wrapped in a transaction: a read-only
+  // rollup does not need one, and every avoidable connection held is one fewer
+  // available to the metering path.
+  const committed = await usageRepo.committedTotals(pool, tenant.id, period);
+  const held = await reservationRepo.heldTotals(pool, tenant.id, period);
 
   return {
     tenant_id: tenant.id,

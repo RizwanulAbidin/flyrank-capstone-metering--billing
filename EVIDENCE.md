@@ -141,9 +141,28 @@ test('floats cannot represent money, integers can', () => {
 
 _Phase 3._
 
-### ☐ Webhooks verify signatures, ignore duplicate events, and update tenant plan/status
+### ☑ Webhooks verify signatures, ignore duplicate events, and update tenant plan/status
 
-_Phase 3._
+```
+ok - a correctly signed checkout.session.completed upgrades the tenant to pro
+ok - a forged signature is rejected with 400 and changes nothing
+ok - a tampered payload with a real signature is rejected
+ok - a missing signature header is rejected with 400
+ok - the same event delivered twice is processed exactly once
+ok - ten simultaneous deliveries of one event are processed exactly once
+ok - subscription.deleted downgrades the tenant back to free
+ok - a past_due subscription blocks billable requests
+ok - an event type we do not handle is acknowledged, not retried forever
+ok - an event for an unknown Stripe customer is ignored, not an error
+```
+
+A forged event leaves `plan_code` at `free` and writes no row to
+`processed_webhook_events`. A verified one flips the tenant to `pro` and the new limits
+(50,000 calls / 5,000,000 tokens) are live immediately. Replay protection is the
+`stripe_event_id` primary key - ten simultaneous deliveries, exactly one applied.
+
+The signatures are generated locally with `Stripe.webhooks.generateTestHeaderString`, so these
+run offline on any machine that clones the repo.
 
 ---
 

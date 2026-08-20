@@ -6,6 +6,8 @@ const { z } = require('zod');
 const { ApiError } = require('../errors');
 const { authenticate } = require('./auth');
 const meter = require('../services/MeterService');
+const stripeService = require('../services/StripeService');
+const webhookService = require('../services/WebhookService');
 
 // Validation at the boundary: bad input becomes a clean 400, never a 500 from
 // somewhere deep in the money math.
@@ -17,6 +19,42 @@ const GenerateBody = z.object({
 
 function buildApp({ simulate } = {}) {
   const app = express();
+
+  // ---------------------------------------------------------------------
+  // The Stripe webhook MUST be registered before express.json(), and must use
+  // express.raw().
+  //
+  // Stripe signs the exact bytes it sent. express.json() consumes the stream,
+  // parses it, and throws the raw bytes away - and re-serialising req.body does
+  // not reliably reproduce them (key order, whitespace, unicode escaping). The
+  // signature would then fail for every genuine event, which looks exactly like
+  // a wrong secret and is the single most common Stripe integration bug.
+  // ---------------------------------------------------------------------
+  app.post(
+    '/webhooks/stripe',
+    express.raw({ type: 'application/json' }),
+    async (req, res, next) => {
+      let event;
+
+      try {
+        event = stripeService.constructEvent(req.body, req.headers['stripe-signature']);
+      } catch (error) {
+        // Verify first, ask questions never. A forged or tampered event is a 400
+        // and touches nothing.
+        return res.status(400).json({
+          error: 'Webhook signature verification failed',
+          code: 'invalid_signature'
+        });
+      }
+
+      try {
+        res.json(await webhookService.process(event));
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+
   app.use(express.json());
 
   app.get('/health', (req, res) => {
@@ -58,6 +96,35 @@ function buildApp({ simulate } = {}) {
     } catch (error) {
       next(error);
     }
+  });
+
+  app.post('/billing/checkout', authenticate, async (req, res, next) => {
+    try {
+      const base = process.env.PUBLIC_BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
+
+      const session = await stripeService.createCheckoutSession({
+        tenant: req.tenant,
+        successUrl: `${base}/billing/success?session_id={CHECKOUT_SESSION_ID}`,
+        cancelUrl: `${base}/billing/cancelled`
+      });
+
+      res.json({ checkout_url: session.url, session_id: session.id });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // Landing pages Stripe redirects the browser back to after Checkout. Nothing is
+  // granted here - the plan changes only when the signed webhook arrives.
+  app.get('/billing/success', (req, res) => {
+    res.json({
+      status: 'checkout complete',
+      note: 'Your plan updates when the signed webhook is verified, not from this redirect.'
+    });
+  });
+
+  app.get('/billing/cancelled', (req, res) => {
+    res.json({ status: 'checkout cancelled' });
   });
 
   app.use((req, res) => {

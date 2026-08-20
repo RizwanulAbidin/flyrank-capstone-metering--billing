@@ -183,3 +183,71 @@ failure output rather than me having to bisect them.
 `npm test` — 86 passing, 0 failing, stable across three consecutive runs. The double-count test
 passes under twenty simultaneous requests, and the boundary returns `429`/`402` per the documented
 precedence.
+
+---
+
+## Phase 3 - Stripe integration (2026-08-20)
+
+Checkout session creation, the webhook handler with signature verification and replay protection,
+and subscription/plan sync. 96 tests passing.
+
+### The bug that cost the most time: a connection-pool deadlock
+
+The test firing ten simultaneous deliveries of one webhook event hung forever. No error, no
+timeout - the whole suite just stopped.
+
+The cause is worth remembering. `WebhookService` opened a transaction, which borrows one connection
+from the pool. Inside it, `tenantRepo.findById` called `pool.query` - asking the pool for a
+**second** connection. node-postgres defaults to a maximum of ten. Ten concurrent webhooks meant ten
+transactions each holding one connection, all of them then waiting for an eleventh that could only
+become free when one of them finished. None could.
+
+It never showed up with one request, or two, or five. It needed exactly the concurrency the test was
+written to produce.
+
+Fixed by making `findById` take an executor - the pool, or the client of a transaction already in
+progress - and passing the client from inside the transaction. Every repository function that can be
+called mid-transaction now takes one. `MeterService.usageFor` was cleaned up at the same time: it
+was wrapping a read-only rollup in a transaction for no reason, holding a connection it did not need.
+
+The general rule I did not know before: **a function running inside a transaction must never reach
+for the pool.** Doing so is invisible under light load and deadlocks under real load.
+
+### Decisions worth defending
+
+- **The webhook route is registered before `express.json()` and uses `express.raw()`.** Stripe signs
+  the exact bytes it sent; `express.json()` consumes the stream and discards them, and
+  re-serialising `req.body` does not reproduce them (key order, whitespace, unicode escaping). Get
+  this wrong and every genuine event fails verification, which looks exactly like a wrong secret.
+- **Claim and apply happen in one transaction.** If applying fails, the claim rolls back with it, so
+  the event is not marked processed and Stripe's retry can redo it. A claim committed separately
+  would silently swallow the event whenever handling failed.
+- **`ON CONFLICT DO NOTHING` for the webhook claim, rather than catching the unique violation.** The
+  claim shares a transaction with the work; a raised constraint error would abort that transaction
+  and every statement after it would fail with "current transaction is aborted". The idempotency
+  keys in Phase 2 use try/catch instead, because there the claim is its own short transaction and
+  the existing row has to be read back.
+- **Unhandled event types return 200, not 404.** Stripe retries anything that is not acknowledged.
+  Refusing events we will never handle would mean Stripe retrying them for days.
+- **Unknown Stripe statuses map to `past_due`, not `active`.** Being wrong in the direction of
+  blocking a request is recoverable; being wrong towards granting free access is not.
+- **The success redirect grants nothing.** The plan changes only when the signed webhook is
+  verified. A browser redirect is a claim by the client, not proof of payment.
+- **The tests never touch Stripe.** A signature is HMAC-SHA256 over `timestamp.rawBody` keyed by the
+  `whsec_` secret, so correctly-signed and deliberately-forged events are built locally. Offline,
+  deterministic, and they run for anyone who clones the repo.
+
+### Where AI helped
+
+Wrote the service, repositories, route wiring and tests, and diagnosed the pool deadlock from the
+symptom (a hang, with no output) rather than me having to bisect it.
+
+### Still to do in this phase
+
+One live Checkout in the browser, with a real test key and `stripe listen` running, to confirm the
+end-to-end path outside the test suite. Everything else is verified.
+
+### Gate
+
+`npm test` - 96 passing, 0 failing, stable across three consecutive runs. Forged signature returns
+400 and changes nothing; a replayed event is processed exactly once.

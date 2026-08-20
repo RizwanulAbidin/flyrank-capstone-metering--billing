@@ -32,8 +32,13 @@ async function findByApiKeyHash(apiKeyHash) {
   return mapTenant(rows[0]);
 }
 
-async function findById(tenantId) {
-  const { rows } = await pool.query(`${TENANT_WITH_PLAN} WHERE t.id = $1`, [tenantId]);
+// Takes an executor - either the pool, or the client of a transaction already in
+// progress. Passing the client matters: a function inside a transaction that
+// reaches for the pool borrows a SECOND connection, and with enough concurrent
+// transactions the pool runs dry and the first one waits forever for a connection
+// only it could release. That deadlock is why this parameter exists.
+async function findById(executor, tenantId) {
+  const { rows } = await executor.query(`${TENANT_WITH_PLAN} WHERE t.id = $1`, [tenantId]);
   return mapTenant(rows[0]);
 }
 
@@ -48,6 +53,16 @@ async function lockForUpdate(client, tenantId) {
   return mapTenant(rows[0]);
 }
 
+// How a webhook finds its tenant: Stripe knows a customer id, not our tenant id.
+async function findByStripeCustomerId(executor, stripeCustomerId) {
+  const { rows } = await executor.query(
+    `${TENANT_WITH_PLAN} WHERE t.stripe_customer_id = $1`,
+    [stripeCustomerId]
+  );
+
+  return mapTenant(rows[0]);
+}
+
 async function setPlan(client, tenantId, planCode, subscriptionStatus) {
   await client.query(
     'UPDATE tenants SET plan_code = $2, subscription_status = $3 WHERE id = $1',
@@ -55,4 +70,18 @@ async function setPlan(client, tenantId, planCode, subscriptionStatus) {
   );
 }
 
-module.exports = { findByApiKeyHash, findById, lockForUpdate, setPlan };
+async function setStripeCustomer(client, tenantId, stripeCustomerId) {
+  await client.query('UPDATE tenants SET stripe_customer_id = $2 WHERE id = $1', [
+    tenantId,
+    stripeCustomerId
+  ]);
+}
+
+module.exports = {
+  findByApiKeyHash,
+  findById,
+  findByStripeCustomerId,
+  lockForUpdate,
+  setPlan,
+  setStripeCustomer
+};
