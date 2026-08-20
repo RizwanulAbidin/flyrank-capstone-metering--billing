@@ -1,0 +1,24 @@
+# Manifest the evaluator reads. Keep every command here runnable on a clean machine.
+# Phase 0: only `test` is real. `run`, `seed` and the endpoints land in Phase 2.
+
+name: flyrank-capstone-metering-billing
+description: >-
+  Usage metering and billing engine. Idempotent metering with reserve-then-commit
+  quota enforcement, integer money math with LLM token pricing rules, and Stripe
+  test-mode subscriptions synced through signature-verified webhooks.
+
+language: javascript
+runtime: node >=20
+
+# TODO Phase 2: becomes `docker compose up --build`
+run: null
+
+# TODO Phase 2: seeds two plans and a tenant sitting just under its quota
+seed: null
+
+test: npm test
+
+base_url: http://localhost:3000
+
+# TODO Phase 2-4: fill in as each endpoint lands.
+endpoints: []
