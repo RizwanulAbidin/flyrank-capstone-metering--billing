@@ -120,5 +120,10 @@ _Phase 4. Satisfies shared requirement #3, which the core checklist does not men
 ### ◐ README + architecture diagram + setup instructions; submission-pack files present
 
 All five required files exist as of Phase 0: `README.md`, `capstone.yaml`, `EVIDENCE.md`,
-`BUILDLOG.md`, `.env.example`. Contents fill in per phase. The architecture diagram arrives with
-Phase 1.
+`BUILDLOG.md`, `.env.example`.
+
+The ASCII architecture diagram is in the README as of Phase 1, alongside the plan table, the API
+surface, the policies and the limitations. The full design contract is in `DESIGN.md`.
+
+Still outstanding: setup and run instructions, which cannot be written honestly until there is
+something to run (Phase 2).

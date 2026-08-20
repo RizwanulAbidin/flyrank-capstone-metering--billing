@@ -1,7 +1,8 @@
 # Usage Metering & Billing Engine
 
-> **Status: Phase 0 of 5 — repo and test foundation.** The service itself is not built yet.
-> This README grows one section per phase; sections marked _pending_ are not yet true.
+> **Status: Phase 1 of 5 — designed, not yet built.** The full design is in
+> [`DESIGN.md`](DESIGN.md). This README grows one section per phase; sections marked _pending_ are
+> not yet true.
 
 The backend service that answers the three questions every SaaS product has to answer about a
 customer: **how much have they used, what does it cost, and are they allowed to do this next
@@ -39,7 +40,46 @@ returning an unrelated earlier response.
 
 ## Architecture
 
-_Pending — Phase 1._
+Three paths. One writes usage, one reads it, one syncs payment state.
+
+```
+                    Authorization: Bearer <api key>
+  client ──────────►│ Idempotency-Key: <unique>          POST /generate
+                    ▼
+         ┌──────────────────────────────────────────────────────────────┐
+         │  1. INSERT idempotency key   UNIQUE(tenant, endpoint, key)   │
+         │        duplicate?  ├─ different body ──────────────► 422     │
+         │                    ├─ still running ───────────────► 409     │
+         │                    └─ completed ──► replay stored response   │
+         │                                                              │
+         │  2. RESERVE  estimate high (worst-case output + reasoning)   │
+         │        committed usage + held reservations vs 3 limits       │
+         │              calls · tokens · spend cap                      │
+         │        doesn't fit ─► drop key, 429 / 402 + which limit      │
+         │        fits ───────► INSERT reservation (held, 5 min TTL)    │
+         │                                                              │
+         │  3. do the work            (simulated; actual ≠ estimate)    │
+         │                                                              │
+         │  4. COMMIT   INSERT usage_events with the ACTUAL amounts     │
+         │              reservation ─► committed, surplus released      │
+         └──────────────────────────────────────────────────────────────┘
+
+  GET /usage ◄──── rollup(usage_events + held reservations)
+                   { used, limits, cost_micros, held }
+
+  Stripe Checkout (test mode) ──► subscription created
+  Stripe ──signed webhook──► POST /webhooks/stripe
+                               ├─ verify signature on the RAW body ─► forged = 400
+                               ├─ INSERT stripe_event_id (pk)      ─► replay = ignored
+                               └─ update tenant plan / status
+
+  nightly job ──► release expired reservations · reconcile plans against Stripe
+```
+
+The two mechanisms that make this correct are both **database constraints, not code checks**: a
+`UNIQUE` index stops duplicate keys, and a held reservation row is visible to the next request so
+concurrent calls cannot all see the same headroom. See
+[`DESIGN.md` §5](DESIGN.md) for why a read-then-check loses both races.
 
 ## Money
 
@@ -53,13 +93,35 @@ Rounding happens in exactly one place — `costMicros` in [`src/money.js`](src/m
 pinned by tests. See [`test/money.test.js`](test/money.test.js), including the one-line test that
 documents why floats are not an option.
 
+## Plans
+
+| Plan | API calls / month | Tokens / month | Spend cap / month |
+|---|---|---|---|
+| Free | 1,000 | 100,000 | $1.00 |
+| Pro | 50,000 | 5,000,000 | $100.00 |
+
+Three limits, because a tenant can run out three different ways. The free spend cap is set low
+relative to the token quota on purpose: 100,000 output tokens costs $1.50, so a request-heavy
+workload hits the **money** cap first while a cached-input-heavy one hits the **token** count first.
+Both orders are tested.
+
 ## Data model
 
-_Pending — Phase 1._
+Seven tables, every customer-owned row carrying `tenant_id`: `plans`, `tenants`, `subscriptions`,
+`usage_events`, `idempotency_keys`, `reservations`, `processed_webhook_events`. Columns, indexes and
+the reasoning are in [`DESIGN.md` §4](DESIGN.md).
 
 ## API
 
-_Pending — Phase 2._
+Designed; implementation lands in Phases 2–3.
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| `POST` | `/generate` | API key + `Idempotency-Key` | The billable action |
+| `GET` | `/usage` | API key | Rollup: used, limits, cost, held reservations |
+| `POST` | `/billing/checkout` | API key | Create a Stripe Checkout session for Pro |
+| `POST` | `/webhooks/stripe` | Stripe signature | Subscription sync |
+| `GET` | `/health` | none | Liveness |
 
 ## Running it
 
@@ -71,20 +133,69 @@ npm test
 
 ## Policies
 
-_Pending — Phase 1._ These will be stated here in full, each with a test that enforces it:
-the all-or-nothing quota boundary, what counts toward the token quota, reservation expiry, and
-which status code means what.
+Each of these has a test behind it. Full reasoning in [`DESIGN.md` §7](DESIGN.md).
+
+**All-or-nothing boundary.** A request whose reservation does not fit is rejected in full — nothing
+recorded, no partial usage. At 998 of 1,000 tokens, a request needing 5 is refused outright rather
+than consuming the remaining 2.
+
+**What counts toward the token quota.** Input + cached input + output + reasoning, counted raw.
+Pricing treats those four categories differently; the quota does not.
+
+**Status codes**, checked in order, first failure wins:
+
+| Order | Condition | Code |
+|---|---|---|
+| 1 | subscription not active | `402` |
+| 2 | spend cap would be exceeded | `402` |
+| 3 | call or token quota would be exceeded | `429` |
+
+The line between them: **`429` means a counted allowance is used up; `402` means money or plan
+state is the problem.** Every rejection names the limit, the current value, and what was asked for.
+
+**Idempotency.** Keys are scoped to `(tenant, endpoint)`. Same key and same body replays the
+original response. Same key with a *different* body returns `422` — the client has a bug, and
+silently replaying an unrelated response would hide it. Same key while the first is still in flight
+returns `409`. Rejected requests do **not** persist their key, so a tenant who upgrades and retries
+is re-evaluated rather than served a stale `429`.
+
+**Reservation expiry.** A held reservation older than 5 minutes is released by the nightly job. A
+process that dies between reserve and commit must not lock quota away forever.
+
+**Billing periods are UTC calendar months**, read through an injectable clock so month rollover can
+be tested rather than hoped for.
 
 ## Limitations
 
-_Pending — Phase 4._ Will include the deliberate non-goal (no invoicing, proration, or overage
-billing) and the auditability work not taken on: effective-dated pricing, an append-only ledger
-with reversals, and a `GET /usage/explain` endpoint.
+Decided in Phase 1, so these are choices rather than oversights. Reasoning in
+[`DESIGN.md` §10](DESIGN.md).
+
+**The headline non-goal: no invoicing, proration, or overage billing.** Usage is metered and priced;
+turning that into a statement, charging past the limit, or fairly splitting a mid-cycle plan change
+is out of scope.
+
+Also not built:
+
+- **Effective-dated pricing.** Prices are constants, so changing one would silently change
+  historical totals. The fix is a price-version table with each usage event pinning the version that
+  priced it.
+- **Append-only ledger with reversals.** A failed downstream action would need its event deleted
+  rather than compensated with a negative entry.
+- **`GET /usage/explain`** — per-charge derivation for a support team.
+- **Tenant-local billing timezones.** Everything is UTC.
+- **API key rotation.** One hashed key per tenant.
+
+The first three are a coherent "auditability" package that was weighed against the enforcement work
+actually built (reserve → commit, hard spend cap) and deliberately deferred rather than
+half-finished.
+
+_Runtime limitations discovered during the build get added here in Phase 4._
 
 ## Repository files
 
 | File | What it is |
 |---|---|
+| `DESIGN.md` | The design contract: data model, metering path, policies, non-goals |
 | `capstone.yaml` | Manifest the evaluator reads: run, seed, test, base URL, endpoints |
 | `EVIDENCE.md` | One pasted proof per Definition-of-Done checkbox |
 | `BUILDLOG.md` | Honest log of where AI helped and where it was wrong |

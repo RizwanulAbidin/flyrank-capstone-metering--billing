@@ -66,3 +66,49 @@ Flagging these now so I actually understand them rather than discovering at the 
 ### Gate
 
 `npm test` — 27 tests, all passing. Wired into `capstone.yaml` as the `test:` command.
+
+---
+
+## Phase 1 — design (2026-08-20)
+
+Output: [`DESIGN.md`](DESIGN.md), plus the architecture, plans, policies, API and limitations
+sections of the README.
+
+### Decisions worth defending
+
+- **Three limits per plan, not two.** The brief lists calls and tokens; the spend cap I added makes
+  a third. Free's cap ($1.00) is deliberately low against its token quota (100k tokens costs $1.50
+  at the output rate) so that the money limit and the count limit bind in different orders
+  depending on the token mix. Both orders get a test.
+- **`billing_period` is stored on each row, not derived at query time.** Makes the rollup an index
+  lookup, and means an event's period cannot drift if the clock logic changes later.
+- **A rejected request deletes its idempotency key rather than storing the 429.** Storing it means
+  a tenant who upgrades and retries with the same key is served a stale rejection from before the
+  upgrade. Only successful outcomes are persisted for replay. Nothing was recorded on a rejection,
+  so re-evaluating is safe.
+- **Status-code precedence written down**: inactive subscription → `402`, spend cap → `402`, counted
+  quota → `429`. The line is that `429` means an allowance is used up and `402` means money or plan
+  state is the problem. Without a stated order, "which code when both are exceeded?" gets answered
+  differently in different code paths.
+- **The reservation over-estimates on purpose** — worst-case output plus an equal allowance for
+  reasoning tokens. Under-estimating lets a tenant burst past the cap; over-estimating only means
+  being told "no" slightly early, with the surplus released seconds later.
+- **The simulated work must return an amount different from the estimate.** If actual always equals
+  estimate, the release path never runs and reserve-then-commit is untested theatre.
+
+### Where AI helped
+
+Wrote `DESIGN.md` and the README sections from the plan we agreed, and pushed back on two things I
+had not thought about: that the estimate needs a reasoning allowance at all (I would have reserved
+only `max_output_tokens`), and that a rejected request storing its idempotency key creates the
+stale-429 trap above.
+
+### Still open
+
+Nothing blocking. The plan limits and the 5-minute reservation TTL are arbitrary-but-reasonable
+numbers; if they turn out to make a poor demo they get changed in Phase 5 and noted here.
+
+### Gate
+
+Design doc written. Data model, metering path, policies, status codes and non-goals all settled
+before any service code exists.
