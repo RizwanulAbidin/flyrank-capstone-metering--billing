@@ -48,9 +48,6 @@ except where noted below.
   on would have done exactly that. Replaced with `src/money.js` — real capstone code, pure
   functions, obvious right answers, and needed by everything later anyway. Better outcome from a
   rule I nearly broke.
-- **Repo name.** The brief suggests `flyrank-capstone-metering-billing`; I created
-  `flyrank-capstone-metering--billing` with a double hyphen. Noted rather than silently ignored —
-  decision on renaming recorded below once made.
 
 ### Things I need to be able to explain
 
