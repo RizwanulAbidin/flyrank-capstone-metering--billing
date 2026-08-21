@@ -181,7 +181,7 @@ npm install
 npm test
 ```
 
-108 tests. The webhook tests generate their own Stripe signatures locally, so no Stripe account is
+109 tests. The webhook tests generate their own Stripe signatures locally, so no Stripe account is
 needed to run them.
 
 ### The panel
