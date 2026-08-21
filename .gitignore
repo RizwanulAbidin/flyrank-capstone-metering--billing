@@ -2,3 +2,6 @@ node_modules/
 .env
 *.log
 coverage/
+
+# transient job output; a real run is quoted in EVIDENCE.md instead
+output/reconcile-report.json

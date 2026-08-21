@@ -216,8 +216,8 @@ ok - the same event delivered twice is processed exactly once
 ok - ten simultaneous deliveries of one event are processed exactly once
 ok - a forged signature is rejected with 400 and changes nothing
 ok - a tampered payload with a real signature is rejected
-# tests 108
-# pass 108
+# tests 109
+# pass 109
 # fail 0
 ```
 
