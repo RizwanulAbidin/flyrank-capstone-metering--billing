@@ -1,7 +1,7 @@
 # Usage Metering & Billing Engine
 
-> **Status: Phase 4 of 5 — built, tested, and verified against live Stripe test mode.**
-> 108 tests passing. The design contract is in [`DESIGN.md`](DESIGN.md); the proof for each
+> **Status: complete.** Built, tested, and verified against live Stripe test mode.
+> 109 tests passing. The design contract is in [`DESIGN.md`](DESIGN.md); the proof for each
 > Definition-of-Done box is in [`EVIDENCE.md`](EVIDENCE.md).
 
 The backend service that answers the three questions every SaaS product has to answer about a
@@ -10,10 +10,11 @@ thing?**
 
 FlyRank internship backend-track capstone.
 
-## What it will do
+## What it does
 
 - **Meter** every billable action to a tenant, exactly once, even when the client retries.
 - **Enforce** the tenant's plan quota *before* the action runs — and refuse honestly when it will not fit.
+- **Show it**, on a live panel at `/dashboard`, so the limits and the refusals are visible rather than described.
 - **Price** usage with real LLM token rules: cached input is cheaper, reasoning tokens bill as output.
 - **Sync** subscription state from Stripe (test mode) through signature-verified, deduplicated webhooks.
 
@@ -119,6 +120,8 @@ All five endpoints are built and covered by tests.
 |---|---|---|---|
 | `POST` | `/generate` | API key + `Idempotency-Key` | The billable action |
 | `GET` | `/usage` | API key | Rollup: used, limits, cost, held reservations |
+| `GET` | `/usage/events` | API key | The tenant's recent usage events |
+| `GET` | `/dashboard` | none | The metering panel (a client; it holds no privileges) |
 | `POST` | `/billing/checkout` | API key | Create a Stripe Checkout session for Pro |
 | `POST` | `/webhooks/stripe` | Stripe signature | Subscription sync |
 | `GET` | `/health` | none | Liveness |
@@ -181,14 +184,40 @@ npm test
 108 tests. The webhook tests generate their own Stripe signatures locally, so no Stripe account is
 needed to run them.
 
+### The panel
+
+Open **http://localhost:3000/dashboard**.
+
+Pick a tenant, then send traffic and watch the meters. The buttons cover the three cases worth
+seeing: a normal request, a retry with the same idempotency key, and the same key with a changed
+body. "Send until refused" walks a tenant into its limit.
+
+The meters are **segmented rather than smooth**, because a quota is a count of discrete things and a
+continuous bar would picture the wrong data type. Held reservations appear as dimmed segments, so an
+in-flight request is visible instead of hidden.
+
+The panel authenticates with a tenant's own API key and calls only `/usage`, `/usage/events` and
+`/generate` - the same endpoints a customer gets. There is deliberately **no endpoint that lists all
+tenants**: a convenient dashboard is not a good reason to undo tenant isolation. To show isolation,
+open two tabs on different tenants.
+
 ### The background job
 
 ```
-npm run reconcile
+npm run reconcile                              # one pass, then exit
+docker compose --profile jobs up -d reconcile  # scheduled, every RECONCILE_INTERVAL_MS
 ```
 
-Releases expired reservations and corrects any tenant whose plan disagrees with Stripe. Prints an
-honest report.
+Releases reservations left held past their expiry, and corrects any tenant whose plan disagrees with
+Stripe. Stripe is the authority on payment; this database only mirrors it.
+
+- **Retries once** on a timeout, a 5xx or a rate limit. Never on a 404 or a 400 - those are answers,
+  not glitches.
+- **Alerts on failure** three ways: a marked `ALERT` log line, a non-zero exit code so a scheduler
+  notices, and an optional POST to `ALERT_WEBHOOK_URL`.
+- **Writes `output/reconcile-report.json`** every run - counts, corrections, and every failure with
+  its reason.
+- One tenant failing never abandons the rest of the run.
 
 ### Stripe (optional)
 
@@ -268,6 +297,7 @@ _Runtime limitations discovered during the build get added here in Phase 4._
 |---|---|
 | `DESIGN.md` | The design contract: data model, metering path, policies, non-goals |
 | `DEMO.md` | The rehearsed six-minute demo script, with real captured output |
+| `src/http/dashboard.html` | The metering panel - one self-contained file, no build step |
 | `capstone.yaml` | Manifest the evaluator reads: run, seed, test, base URL, endpoints |
 | `EVIDENCE.md` | One pasted proof per Definition-of-Done checkbox |
 | `BUILDLOG.md` | Honest log of where AI helped and where it was wrong |

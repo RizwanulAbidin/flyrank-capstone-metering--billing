@@ -33,5 +33,24 @@ services:
       timeout: 5s
       retries: 10
 
+  # The scheduled background job. Off by default so `docker compose up` stays
+  # fast; start it with `docker compose --profile jobs up -d reconcile`.
+  reconcile:
+    build: .
+    profiles: ["jobs"]
+    environment:
+      DATABASE_URL: postgres://postgres:dev@db:5432/metering
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-sk_test_placeholder}
+      # How often to compare against Stripe. An hour in production; short here so
+      # the behaviour is observable during a demo.
+      RECONCILE_INTERVAL_MS: ${RECONCILE_INTERVAL_MS:-3600000}
+      # Optional. If set, a run with failures POSTs its report here.
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    command: node src/jobs/reconcile.js --loop
+
 volumes:
   meteringdata:

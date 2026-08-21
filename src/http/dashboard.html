@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Metering panel</title>
+<style>
+  /* Segmented meters, not smooth bars. A quota is a count of discrete things -
+     calls, tokens - so a continuous gradient would be a picture of the wrong
+     data type. Every segment is 5% of the allowance and either lit or not. */
+  :root {
+    --paper:  #eef1f4;
+    --panel:  #ffffff;
+    --ink:    #0e1620;
+    --muted:  #5c6b7a;
+    --rule:   #ccd6e0;
+    --calls:  #1c3f94;
+    --tokens: #146b52;
+    --spend:  #8a5a00;
+    --refuse: #a3231b;
+    --dim:    #dde4ea;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    padding: 28px 20px 60px;
+    background: var(--paper);
+    color: var(--ink);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+
+  .wrap { max-width: 880px; margin: 0 auto; }
+
+  .num {
+    font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .eyebrow {
+    font-size: 11px; font-weight: 600; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--muted);
+  }
+
+  header { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
+  h1 { margin: 2px 0 0; font-size: 25px; font-weight: 650; letter-spacing: -.015em; }
+
+  select {
+    font: inherit; padding: 7px 10px; border: 1px solid var(--rule);
+    border-radius: 6px; background: var(--panel); color: var(--ink);
+  }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--rule);
+    border-radius: 10px; padding: 18px 20px; margin-bottom: 14px;
+  }
+
+  .planline { display: flex; align-items: baseline; gap: 10px; margin-bottom: 18px; }
+  .plan {
+    font-size: 12px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+    padding: 3px 9px; border-radius: 4px; background: var(--ink); color: var(--panel);
+  }
+  .plan[data-plan="pro"] { background: var(--tokens); }
+  .plan[data-status="past_due"], .plan[data-status="canceled"] { background: var(--refuse); }
+
+  .meter { margin-bottom: 16px; }
+  .meter:last-child { margin-bottom: 0; }
+  .meter-top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+  .meter-name { font-size: 12px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; }
+  .meter-val { font-size: 14px; }
+  .meter-val .of { color: var(--muted); }
+
+  .segments { display: flex; gap: 2px; height: 22px; }
+  .seg { flex: 1; background: var(--dim); border-radius: 1px; transition: background .18s ease; }
+  .seg.on { background: var(--c); }
+  .seg.held { background: var(--c); opacity: .38; }
+  .meter[data-over="true"] .seg.on { background: var(--refuse); }
+  .meter[data-full="true"] .meter-val { color: var(--refuse); font-weight: 700; }
+
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  button {
+    font: inherit; padding: 9px 14px; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--ink); background: var(--ink); color: var(--panel);
+  }
+  button.secondary { background: var(--panel); color: var(--ink); }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button:focus-visible { outline: 3px solid var(--calls); outline-offset: 2px; }
+  .hint { margin: 10px 0 0; font-size: 13px; color: var(--muted); }
+
+  table { width: 100%; border-collapse: collapse; }
+  th {
+    text-align: left; font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--muted); font-weight: 600; padding: 0 0 8px; border-bottom: 1px solid var(--rule);
+  }
+  td { padding: 9px 0; border-bottom: 1px solid var(--rule); vertical-align: baseline; }
+  tr:last-child td { border-bottom: 0; }
+
+  /* The status code is the loudest thing in the row, because in this system the
+     status code is the answer. */
+  .code { font-size: 19px; font-weight: 700; width: 62px; }
+  .code[data-ok="true"]  { color: var(--tokens); }
+  .code[data-ok="false"] { color: var(--refuse); }
+  .what { font-size: 14px; }
+  .detail { font-size: 12.5px; color: var(--muted); }
+  .ts { font-size: 12px; color: var(--muted); text-align: right; white-space: nowrap; }
+
+  @keyframes flash { from { background: #fbeceb; } to { background: transparent; } }
+  tr.fresh td { animation: flash .9s ease-out; }
+
+  .empty { color: var(--muted); font-size: 14px; padding: 8px 0; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div>
+      <div class="eyebrow">Usage metering &amp; billing</div>
+      <h1>Metering panel</h1>
+    </div>
+    <label>
+      <span class="eyebrow">Tenant</span><br>
+      <select id="tenant"></select>
+    </label>
+  </header>
+
+  <section class="card">
+    <div class="planline">
+      <span class="plan" id="plan">—</span>
+      <span class="detail" id="period"></span>
+    </div>
+    <div id="meters"></div>
+  </section>
+
+  <section class="card">
+    <div class="eyebrow" style="margin-bottom:10px">Send traffic</div>
+    <div class="actions">
+      <button id="send">Send a request</button>
+      <button id="retry" class="secondary">Retry with the same key</button>
+      <button id="mutate" class="secondary">Reuse the key, change the body</button>
+      <button id="fill" class="secondary">Send until refused</button>
+    </div>
+    <p class="hint" id="hint">Each request bills 1,200 input, 8,000 cached and up to 2,000 output tokens.</p>
+  </section>
+
+  <section class="card">
+    <div class="eyebrow" style="margin-bottom:10px">Ledger</div>
+    <table>
+      <thead><tr><th>Code</th><th>What happened</th><th style="text-align:right">Time</th></tr></thead>
+      <tbody id="log"><tr><td colspan="3" class="empty">Nothing yet. Send a request.</td></tr></tbody>
+    </table>
+  </section>
+
+</div>
+
+<script>
+const TENANTS = [
+  { name: 'Nearly Full Ltd  (token quota one request away)', key: 'sk_demo_nearlyfull_00000000000' },
+  { name: 'Nearly Broke Ltd (spend cap one request away)',   key: 'sk_demo_nearlybroke_0000000000' },
+  { name: 'Acme Ltd',                                        key: 'sk_demo_acme_0000000000000000' },
+  { name: 'Globex Inc',                                      key: 'sk_demo_globex_000000000000000' }
+];
+
+const BODY = { input_tokens: 1200, cached_input_tokens: 8000, max_output_tokens: 2000 };
+const SEGMENTS = 20;
+
+const el = (id) => document.getElementById(id);
+let lastKey = null;
+let rows = [];
+
+TENANTS.forEach((t, i) => {
+  const o = document.createElement('option');
+  o.value = t.key;
+  o.textContent = t.name;
+  el('tenant').appendChild(o);
+});
+el('tenant').value = localStorage.getItem('tenantKey') || TENANTS[0].key;
+
+function apiKey() { return el('tenant').value; }
+function money(micros) { return '$' + (micros / 1e6).toFixed(4); }
+function n(v) { return v.toLocaleString('en-US'); }
+
+function meter(name, colour, used, held, limit, format) {
+  const fmt = format || n;
+  const usedSegs = Math.min(SEGMENTS, Math.ceil((used / limit) * SEGMENTS));
+  const heldSegs = Math.min(SEGMENTS - usedSegs, Math.ceil((held / limit) * SEGMENTS));
+  const over = used + held >= limit;
+
+  let segs = '';
+  for (let i = 0; i < SEGMENTS; i++) {
+    const cls = i < usedSegs ? 'seg on' : i < usedSegs + heldSegs ? 'seg held' : 'seg';
+    segs += '<div class="' + cls + '"></div>';
+  }
+
+  return '<div class="meter" style="--c:' + colour + '" data-over="' + over + '" data-full="' + over + '">'
+    + '<div class="meter-top"><span class="meter-name">' + name + '</span>'
+    + '<span class="meter-val num">' + fmt(used)
+    + (held > 0 ? ' <span class="of">+ ' + fmt(held) + ' held</span>' : '')
+    + ' <span class="of">/ ' + fmt(limit) + '</span></span></div>'
+    + '<div class="segments">' + segs + '</div></div>';
+}
+
+async function refresh() {
+  const res = await fetch('/usage', { headers: { Authorization: 'Bearer ' + apiKey() } });
+
+  if (!res.ok) {
+    el('meters').innerHTML = '<p class="empty">That API key was not recognised.</p>';
+    return;
+  }
+
+  const u = await res.json();
+
+  el('plan').textContent = u.plan;
+  el('plan').dataset.plan = u.plan;
+  el('plan').dataset.status = u.subscription_status || 'active';
+  el('period').textContent = 'billing period ' + u.billing_period;
+
+  el('meters').innerHTML =
+      meter('API calls', 'var(--calls)',  u.used.calls,  u.held.calls,  u.limits.api_calls)
+    + meter('Tokens',    'var(--tokens)', u.used.tokens, u.held.tokens, u.limits.tokens)
+    + meter('Spend',     'var(--spend)',  u.used.cost_micros, u.held.cost_micros, u.limits.spend_cap_micros, money);
+}
+
+function describe(status, body, replayed) {
+  if (status === 200 && replayed) return ['Replay of an earlier request. Nothing new was billed.', ''];
+  if (status === 200) {
+    return ['Billed ' + n(body.used.tokens) + ' tokens · ' + money(body.used.cost_micros),
+            'reserved ' + n(body.reserved.tokens) + ', released ' + n(body.released.tokens)];
+  }
+  const d = body.details || {};
+  if (status === 429) return [body.error, 'would reach ' + n(d.would_reach) + ' of ' + n(d.cap)];
+  if (status === 402 && d.cap_micros !== undefined) {
+    return [body.error, 'would reach ' + money(d.would_reach_micros) + ' of ' + money(d.cap_micros)];
+  }
+  return [body.error, body.code || ''];
+}
+
+function log(status, body, replayed, key) {
+  const [what, detail] = describe(status, body, replayed);
+  rows.unshift({ status, what, detail, key, at: new Date(), fresh: true });
+  rows = rows.slice(0, 12);
+
+  el('log').innerHTML = rows.map((r) =>
+    '<tr class="' + (r.fresh ? 'fresh' : '') + '">'
+    + '<td class="code num" data-ok="' + (r.status < 400) + '">' + r.status + '</td>'
+    + '<td><div class="what">' + r.what + '</div>'
+    + (r.detail ? '<div class="detail num">' + r.detail + '</div>' : '')
+    + '<div class="detail">key ' + r.key + '</div></td>'
+    + '<td class="ts num">' + r.at.toLocaleTimeString() + '</td></tr>'
+  ).join('');
+
+  rows.forEach((r) => { r.fresh = false; });
+}
+
+async function send(key, body) {
+  const res = await fetch('/generate', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: 'Bearer ' + apiKey(),
+      'Idempotency-Key': key
+    },
+    body: JSON.stringify(body)
+  });
+
+  log(res.status, await res.json(), res.headers.get('Idempotent-Replay') === 'true', key);
+  await refresh();
+  return res.status;
+}
+
+function freshKey() {
+  lastKey = 'ui-' + Date.now().toString(36);
+  return lastKey;
+}
+
+el('send').onclick = () => send(freshKey(), BODY);
+
+el('retry').onclick = () => {
+  if (!lastKey) return;
+  send(lastKey, BODY);
+};
+
+el('mutate').onclick = () => {
+  if (!lastKey) return;
+  send(lastKey, { input_tokens: 7, cached_input_tokens: 7, max_output_tokens: 7 });
+};
+
+el('fill').onclick = async (e) => {
+  e.target.disabled = true;
+  for (let i = 0; i < 40; i++) {
+    const status = await send(freshKey(), BODY);
+    if (status !== 200) break;
+  }
+  e.target.disabled = false;
+};
+
+el('tenant').onchange = () => {
+  localStorage.setItem('tenantKey', apiKey());
+  lastKey = null;
+  rows = [];
+  el('log').innerHTML = '<tr><td colspan="3" class="empty">Nothing yet. Send a request.</td></tr>';
+  refresh();
+};
+
+refresh();
+setInterval(refresh, 4000);
+</script>
+</body>
+</html>

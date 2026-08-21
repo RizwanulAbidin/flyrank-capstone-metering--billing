@@ -412,3 +412,78 @@ have found them live.
 
 Demo rehearsed twice end to end, all beats produce the output written in `DEMO.md`, and the whole
 suite is green at 108.
+
+---
+
+## Phase 6 - closing the last requirement, and a panel (2026-08-21)
+
+Two pieces: hardening the background job so it actually satisfies shared requirement #3, and a live
+metering panel at `/dashboard`. 109 tests passing.
+
+### The last unticked requirement
+
+An audit against the brief found exactly one gap. Shared requirement #3 in section 12 asks for a
+background job with **retries and a failure alert**; mine had a job, but neither of those, and no
+schedule. Every other box in section 6 and section 12 was already met.
+
+Added all three:
+
+- **Retry once** on a timeout, a 5xx or a rate limit; never on a 404 or a 400, because those are
+  answers rather than glitches. Same rule as the A9 scraper, expressed in Stripe's error types.
+- **Failure alert** as three escalating signals - a marked `ALERT` log line, a non-zero exit code so
+  a scheduler notices, and an optional POST to `ALERT_WEBHOOK_URL`. Different operators watch
+  different things.
+- **A schedule** - a `reconcile` service in compose behind a `jobs` profile, running `--loop`. Kept
+  as an in-process loop rather than a shell `while true`, so a failure surfaces as an alert instead
+  of a container that quietly restarts.
+
+Plus `output/reconcile-report.json` on every run, the same habit as the A9 run report.
+
+### My own alerting was broken, and the failure taught me why
+
+The first run of the hardened job printed exactly this:
+
+```
+ALERT reconcile:
+```
+
+Nothing after the colon. The cause: `AggregateError` - what node-postgres throws when it cannot
+reach the database at all - has an **empty `.message`**, so `${error.message}` rendered nothing.
+
+This is worse than having no alert. A blank alert looks like a successful run with an odd log line,
+and an operator scanning output would skip straight past it. Every error now goes through a
+`describeError` helper that falls back through name, code and message, so the same failure reads
+`AggregateError ECONNREFUSED`.
+
+The trigger was Docker Desktop shutting down mid-session. A genuine outage produced a genuinely
+useless alert, which is the only way that bug was ever going to be found.
+
+### The panel
+
+`/dashboard` - one self-contained file, no build step, no external requests.
+
+- **The meters are segmented rather than smooth.** A quota is a count of discrete things, so a
+  continuous gradient bar would be a picture of the wrong data type. Twenty segments, each 5% of the
+  allowance, lit or unlit. Held reservations render as dimmed segments so an in-flight request is
+  visible rather than hidden.
+- **The status code is the loudest element in each ledger row**, because in this system the status
+  code is the answer.
+- **No endpoint lists all tenants.** The panel authenticates with a tenant's own API key and calls
+  only `/usage`, `/usage/events` and `/generate` - the same endpoints a customer gets, with no
+  privileged access. A convenient dashboard is not a good reason to undo the isolation that Phase 2
+  spent a whole test file proving. Switching tenants means switching keys, and the isolation demo is
+  two browser tabs.
+- The one new endpoint, `GET /usage/events`, is tenant-scoped and 401s without a key, with a test
+  that checks a neighbouring tenant sees none of it - because the panel reads this endpoint, so a
+  leak here would be a leak on screen.
+
+### Where AI helped
+
+Wrote the job hardening, the panel, and the tests; found the last unticked requirement by auditing
+the brief against the repo; and diagnosed the blank-alert bug from a single empty log line.
+
+### Gate
+
+`npm test` - 109 passing. The scheduled job runs on an interval and alerts with a usable message;
+the one-shot exits non-zero when a run had failures. The panel serves, drives real traffic, and
+shows the retry not moving the meters.

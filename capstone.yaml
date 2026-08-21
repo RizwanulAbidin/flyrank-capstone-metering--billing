@@ -23,6 +23,7 @@ test: npm test
 # The reconciliation background job. Releases expired reservations and corrects
 # any tenant whose plan disagrees with Stripe.
 job: npm run reconcile
+job_scheduled: docker compose --profile jobs up -d reconcile
 
 base_url: http://localhost:3000
 
@@ -58,6 +59,20 @@ endpoints:
       409: a request with this idempotency key is still in flight
       422: this idempotency key was already used with a different body
       429: the monthly API call or token quota would be exceeded
+
+  - method: GET
+    path: /usage/events
+    auth: bearer api key
+    expect: 200
+    note: The tenant's own recent events. Tenant-scoped; 401 without a key.
+
+  - method: GET
+    path: /dashboard
+    auth: none
+    expect: 200
+    note: >-
+      The metering panel. A static client with no privileged access - it
+      authenticates to the same endpoints a customer would.
 
   - method: POST
     path: /billing/checkout

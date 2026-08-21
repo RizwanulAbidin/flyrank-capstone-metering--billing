@@ -46,6 +46,23 @@ async function committedTotals(executor, tenantId, billingPeriod) {
   };
 }
 
+// The tenant's own recent activity. Scoped to one tenant like every other read
+// here - there is deliberately no "list all tenants" query anywhere in this
+// codebase, because a dashboard is not a reason to undo tenant isolation.
+async function recentEvents(executor, tenantId, limit = 25) {
+  const { rows } = await executor.query(
+    `SELECT usage_type, quantity, cost_micros, breakdown, occurred_at,
+            to_char(billing_period, 'YYYY-MM-DD') AS billing_period
+     FROM usage_events
+     WHERE tenant_id = $1
+     ORDER BY occurred_at DESC, id DESC
+     LIMIT $2`,
+    [tenantId, limit]
+  );
+
+  return rows.map((row) => ({ ...row, cost_micros: Number(row.cost_micros) }));
+}
+
 async function countEventsForKey(idempotencyKeyId) {
   const { rows } = await pool.query(
     'SELECT COUNT(*)::int AS count FROM usage_events WHERE idempotency_key_id = $1',
@@ -55,4 +72,4 @@ async function countEventsForKey(idempotencyKeyId) {
   return rows[0].count;
 }
 
-module.exports = { insertEvent, committedTotals, countEventsForKey };
+module.exports = { insertEvent, committedTotals, recentEvents, countEventsForKey };

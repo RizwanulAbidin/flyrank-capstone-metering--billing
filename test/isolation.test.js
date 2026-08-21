@@ -143,3 +143,41 @@ test('a revoked or unknown key reaches nothing at all', async () => {
     await server.close();
   }
 });
+
+test('the events feed is tenant-scoped and needs a key', async () => {
+  await ensurePlans();
+  const acme = await createTenant({ name: 'Acme' });
+  const globex = await createTenant({ name: 'Globex' });
+  const server = await startServer({ simulate });
+
+  try {
+    for (let i = 0; i < 2; i += 1) {
+      await call(server.url, { apiKey: acme.apiKey, key: `ev-${i}`, body: SMALL });
+    }
+
+    const unauthenticated = await call(server.url, { method: 'GET', path: '/usage/events' });
+    assert.equal(unauthenticated.status, 401, 'the feed must not be readable without a key');
+
+    const mine = await call(server.url, {
+      method: 'GET',
+      path: '/usage/events',
+      apiKey: acme.apiKey
+    });
+
+    // Two requests, each writing an api_call row and a tokens row.
+    assert.equal(mine.status, 200);
+    assert.equal(mine.body.events.length, 4);
+
+    // The neighbour sees none of it. The dashboard reads this endpoint, so a leak
+    // here would be a leak on screen.
+    const theirs = await call(server.url, {
+      method: 'GET',
+      path: '/usage/events',
+      apiKey: globex.apiKey
+    });
+
+    assert.equal(theirs.body.events.length, 0);
+  } finally {
+    await server.close();
+  }
+});

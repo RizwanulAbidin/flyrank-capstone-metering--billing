@@ -1,11 +1,15 @@
 'use strict';
 
+const path = require('node:path');
+
 const express = require('express');
 const { z } = require('zod');
 
 const { ApiError } = require('../errors');
 const { authenticate } = require('./auth');
 const meter = require('../services/MeterService');
+const usageRepo = require('../repositories/usageRepo');
+const { pool } = require('../db/pool');
 const stripeService = require('../services/StripeService');
 const webhookService = require('../services/WebhookService');
 
@@ -96,6 +100,21 @@ function buildApp({ simulate } = {}) {
     } catch (error) {
       next(error);
     }
+  });
+
+  app.get('/usage/events', authenticate, async (req, res, next) => {
+    try {
+      const limit = Math.min(Number(req.query.limit) || 25, 100);
+      res.json({ events: await usageRepo.recentEvents(pool, req.tenant.id, limit) });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // The operator panel. Static, self-contained, and it talks to the same
+  // authenticated endpoints a customer would - it has no privileged access.
+  app.get('/dashboard', (req, res) => {
+    res.sendFile(path.join(__dirname, 'dashboard.html'));
   });
 
   app.post('/billing/checkout', authenticate, async (req, res, next) => {

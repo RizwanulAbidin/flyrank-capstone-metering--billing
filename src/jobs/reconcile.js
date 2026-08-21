@@ -15,12 +15,61 @@
 //
 // Stripe is the authority on payment. Where the two disagree, Stripe wins.
 
+const fs = require('node:fs/promises');
+const path = require('node:path');
+
 const { pool, withTransaction } = require('../db/pool');
 const { now } = require('../clock');
 const tenantRepo = require('../repositories/tenantRepo');
 const subscriptionRepo = require('../repositories/subscriptionRepo');
 const reservationRepo = require('../repositories/reservationRepo');
 const { mapSubscriptionStatus, toDate } = require('../services/StripeService');
+
+const OUTPUT_DIR = path.join(__dirname, '..', '..', 'output');
+const RETRY_DELAY_MS = 1_000;
+const DEFAULT_INTERVAL_MS = 60 * 60 * 1000;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Not every error has a usable .message. An AggregateError - which is what
+// node-postgres throws when it cannot reach the database at all - has an empty
+// one, so a naive `error.message` produces the alert "ALERT reconcile:" and
+// tells the operator nothing. An alert that says nothing is worse than no alert,
+// because it looks like it worked.
+function describeError(error) {
+  const parts = [error.name, error.code, error.message].filter(Boolean);
+  return parts.length > 0 ? parts.join(' ') : String(error);
+}
+
+// Same rule as the A9 scraper, in Stripe's vocabulary. A network blip or a 5xx is
+// worth one more try; a 404 or a 400 is a clear answer and asking again just
+// makes us a nuisance.
+function isRetryableStripeError(error) {
+  if (error.type === 'StripeConnectionError' || error.type === 'StripeAPIError') {
+    return true;
+  }
+
+  if (error.type === 'StripeRateLimitError' || error.statusCode === 429) {
+    return true;
+  }
+
+  return typeof error.statusCode === 'number' && error.statusCode >= 500;
+}
+
+async function withOneRetry(work) {
+  try {
+    return await work();
+  } catch (error) {
+    if (!isRetryableStripeError(error)) {
+      throw error;
+    }
+
+    await sleep(RETRY_DELAY_MS);
+    return work();
+  }
+}
 
 function defaultStripeClient() {
   const Stripe = require('stripe');
@@ -40,11 +89,13 @@ async function releaseExpiredReservations(at) {
 
 // What Stripe thinks this customer's plan and status are.
 async function stripeViewOf(stripeClient, stripeCustomerId) {
-  const subscriptions = await stripeClient.subscriptions.list({
-    customer: stripeCustomerId,
-    status: 'all',
-    limit: 10
-  });
+  const subscriptions = await withOneRetry(() =>
+    stripeClient.subscriptions.list({
+      customer: stripeCustomerId,
+      status: 'all',
+      limit: 10
+    })
+  );
 
   const live = subscriptions.data.find(
     (s) => s.status === 'active' || s.status === 'trialing' || s.status === 'past_due'
@@ -128,25 +179,113 @@ async function reconcile({ stripeClient, at = now(), tenantIds = null } = {}) {
         report.drift.push(result);
       }
     } catch (error) {
-      report.errors.push({ tenant_id: tenant.id, reason: error.message });
+      report.errors.push({ tenant_id: tenant.id, reason: describeError(error) });
     }
   }
 
   report.duration_ms = Date.now() - startedMs;
+
+  await writeReport(report);
+  await raiseAlertIfNeeded(report);
+
   return report;
 }
 
+// A job that reports nothing can fail silently for weeks. Same habit as the run
+// report in A9: write the numbers down every time, whether or not anyone reads
+// them today.
+async function writeReport(report) {
+  try {
+    await fs.mkdir(OUTPUT_DIR, { recursive: true });
+    await fs.writeFile(
+      path.join(OUTPUT_DIR, 'reconcile-report.json'),
+      JSON.stringify(report, null, 2),
+      'utf8'
+    );
+  } catch (error) {
+    // Never let bookkeeping sink the run that already did the useful work.
+    console.error(`reconcile: could not write report - ${describeError(error)}`);
+  }
+}
+
+// The failure alert. Three escalating signals, because different operators watch
+// different things: a marked log line, a non-zero exit for whatever scheduler
+// invoked us, and an optional POST for a real alerting channel.
+async function raiseAlertIfNeeded(report) {
+  if (report.errors.length === 0) {
+    return;
+  }
+
+  console.error(
+    `ALERT reconcile: ${report.errors.length} of ${report.tenants_checked} tenants could not be checked`
+  );
+
+  for (const failure of report.errors.slice(0, 5)) {
+    console.error(`ALERT   ${failure.tenant_id}: ${failure.reason}`);
+  }
+
+  if (!process.env.ALERT_WEBHOOK_URL) {
+    return;
+  }
+
+  try {
+    await fetch(process.env.ALERT_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job: 'reconcile', report }),
+      signal: AbortSignal.timeout(5_000)
+    });
+  } catch (error) {
+    console.error(`ALERT reconcile: could not deliver alert - ${describeError(error)}`);
+  }
+}
+
+// Runs forever on an interval. Used by the `reconcile` service in compose.yaml.
+// Kept in-process rather than as a shell `while true` loop so a failure is
+// visible as an alert rather than as a container that quietly restarts.
+async function loop(intervalMs) {
+  console.log(`reconcile: scheduled every ${Math.round(intervalMs / 1000)}s`);
+
+  for (;;) {
+    try {
+      const report = await reconcile();
+      console.log(
+        `reconcile: checked ${report.tenants_checked}, corrected ${report.drift_corrected}, ` +
+          `expired ${report.expired_reservations}, errors ${report.errors.length}`
+      );
+    } catch (error) {
+      console.error(`ALERT reconcile: run failed entirely - ${describeError(error)}`);
+    }
+
+    await sleep(intervalMs);
+  }
+}
+
 if (require.main === module) {
-  reconcile()
-    .then(async (report) => {
-      console.log(JSON.stringify(report, null, 2));
-      await pool.end();
-    })
-    .catch(async (error) => {
-      console.error('reconcile failed:', error.message);
+  const intervalMs = Number(process.env.RECONCILE_INTERVAL_MS) || DEFAULT_INTERVAL_MS;
+
+  if (process.argv.includes('--loop')) {
+    loop(intervalMs).catch(async (error) => {
+      console.error('reconcile loop died:', describeError(error));
       await pool.end();
       process.exit(1);
     });
+  } else {
+    reconcile()
+      .then(async (report) => {
+        console.log(JSON.stringify(report, null, 2));
+        await pool.end();
+        // Non-zero so cron, systemd or a compose healthcheck notices. The work
+        // that succeeded is still committed; this only reports that some of it
+        // did not.
+        process.exit(report.errors.length > 0 ? 1 : 0);
+      })
+      .catch(async (error) => {
+        console.error(`ALERT reconcile: ${describeError(error)}`);
+        await pool.end();
+        process.exit(1);
+      });
+  }
 }
 
-module.exports = { reconcile, releaseExpiredReservations };
+module.exports = { reconcile, releaseExpiredReservations, isRetryableStripeError, describeError, loop };

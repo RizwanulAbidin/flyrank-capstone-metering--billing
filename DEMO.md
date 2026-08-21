@@ -23,6 +23,11 @@ $env:Path += ";$env:LOCALAPPDATA\Microsoft\WinGet\Packages\Stripe.StripeCli_Micr
 stripe listen --forward-to localhost:3000/webhooks/stripe
 ```
 
+**The panel** — open **http://localhost:3000/dashboard** and pick *Nearly Full Ltd*.
+
+Run beats 1 and 2 from the panel rather than curl: the buttons do the same thing and the meters make
+it visible. The curl commands below are kept as the fallback if a projector hates the browser.
+
 **Terminal 3 — where you type** — put the demo tenants on their starting line:
 ```
 npm run seed:demo
@@ -49,6 +54,8 @@ $REQ   = '{"input_tokens":1200,"cached_input_tokens":8000,"max_output_tokens":20
 ---
 
 ## Beat 1 — the boundary (~70s)
+
+*In the panel: press **Send a request**, then press it again.*
 
 > "This tenant is on the Free plan: 1,000 API calls, 100,000 tokens, and a $1.00 spend cap a month.
 > They have used 80,000 tokens. Watch what happens as they run out."
@@ -83,6 +90,9 @@ curl -X POST localhost:3000/generate -H $FULL -H "Idempotency-Key: demo-b" \
 ---
 
 ## Beat 2 — the retry does not double-charge (~80s)
+
+*In the panel: **Retry with the same key**, then **Reuse the key, change the body**. Watch the meters
+stay exactly where they are while the ledger gains rows.*
 
 > "Now the part billing systems get sued over. The client's network drops and it retries."
 
@@ -124,6 +134,9 @@ curl -X POST localhost:3000/generate -H $FULL -H "Idempotency-Key: demo-a" \
 ---
 
 ## Beat 3 — money is a different limit from allowance (~40s)
+
+*In the panel: switch the tenant dropdown to **Nearly Broke Ltd** and press **Send a request**. The
+tokens meter is nearly empty and the spend meter is nearly full.*
 
 ```
 curl -X POST localhost:3000/generate -H $BROKE -H "Idempotency-Key: broke-1" \

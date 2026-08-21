@@ -132,19 +132,6 @@ documents the trap rather than merely avoiding it.
 Constants live in `src/config/pricing.js`, quoted as micros per 1,000,000 units. Every rate is
 covered by table-driven tests asserting exact integers - no tolerances.
 
-```
-$ npm test
-
-# tests 27
-# suites 0
-# pass 27
-# fail 0
-# cancelled 0
-# skipped 0
-# todo 0
-# duration_ms 139.207
-```
-
 Includes the test that documents why money is stored as integers at all:
 
 ```js
@@ -235,14 +222,42 @@ Seven tables. Every customer-owned row carries `tenant_id`.
 
 ```
 $ npm test
-# tests 108
-# pass 108
+# tests 109
+# pass 109
 # fail 0
 ```
 
 Eight files: money, pricing, clock, quota (pure), metering, boundary, isolation, webhooks,
 rollover, reconcile. The integration tests run against a real Postgres because the guarantees
 being proved live in database constraints, not in application code.
+
+### ☑ The panel shows the system working, without weakening it
+
+`GET /dashboard` serves a single self-contained page - no build step, no external requests. It
+authenticates with a tenant's own API key and calls only `/usage`, `/usage/events` and `/generate`:
+the same endpoints a customer gets, with no privileged access.
+
+There is deliberately **no endpoint that lists all tenants**. A convenient dashboard is not a good
+reason to undo tenant isolation, so switching tenants means switching keys.
+
+```
+GET /dashboard        -> 200, 11,321 bytes, self-contained
+GET /usage/events     -> 401 without a key
+```
+
+```
+ok - the events feed is tenant-scoped and needs a key
+```
+
+Driven the way the panel drives it:
+
+```
+request 1 -> 200      request 2 -> 429      request 3 -> 429
+retry request 1 -> 200 replay=true
+tokens 90,555 / 100,000 | calls 1 | spend 51,325 micros
+```
+
+One call recorded, not two, after the retry.
 
 ### ☑ A tenant cannot read another tenant's data
 
@@ -301,6 +316,30 @@ second run      : drift_corrected 0     - idempotent, nothing left to fix
 
 Those 36 failures are the resilience rule demonstrated live: 36 tenants errored, the run
 completed anyway, and the one tenant that needed fixing was fixed.
+
+**Retries and failure alerting**, the two halves of shared requirement #3 that the first version
+was missing:
+
+```
+$ docker compose --profile jobs up -d reconcile     # scheduled mode
+
+reconcile-1 | reconcile: scheduled every 15s
+reconcile-1 | ALERT   75455da0-...: Error resource_missing No such customer: 'cus_missed_75455da0'
+reconcile-1 | reconcile: checked 22, corrected 0, expired 0, errors 22
+```
+
+```
+$ npm run reconcile                                  # one pass
+$ echo $?
+1                                                    # non-zero, so a scheduler notices
+
+$ cat output/reconcile-report.json
+{ "tenants_checked": 22, "drift_corrected": 0, "expired_reservations": 0, "errors": [ ... ] }
+```
+
+Retry rule: one more attempt on a timeout, a 5xx or a rate limit; never on a 404 or a 400, because
+those are answers rather than glitches. Alerting is three signals - a marked log line, a non-zero
+exit code, and an optional POST to `ALERT_WEBHOOK_URL`.
 
 ### ☑ README + architecture diagram + setup instructions; submission-pack files present
 
